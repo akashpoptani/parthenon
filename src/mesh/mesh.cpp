@@ -78,6 +78,10 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
                                      "enable a multigrid mesh")),
       nbnew(), nbdel(), step_since_lb(), gflag(), packages(packages),
       resolved_packages(ResolvePackages(packages)),
+      nteams_per_boundary_buffer(
+          pin->GetOrAddInteger("parthenon/mesh", "nteams_per_boundary_buffer", 1)),
+      boundary_buffer_work_chunk_size(
+          pin->GetOrAddInteger("parthenon/mesh", "boundary_buffer_work_chunk_size", 1)),
       // private members:
       num_mesh_threads_(
           pin->GetOrAddInteger("parthenon/mesh", "num_threads", 1,
