@@ -1,4 +1,5 @@
 This branch contains (beyond develop)
+- fix output block Params
 - OpenPMD
 - Add more teams per communication buffer #1271
 - 
