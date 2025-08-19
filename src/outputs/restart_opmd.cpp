@@ -15,10 +15,11 @@
 #include <string>
 #include <vector>
 
+// OpenPMD headers
+#include <openPMD/openPMD.hpp>
+
 #include "basic_types.hpp"
 #include "interface/params.hpp"
-#include "openPMD/Iteration.hpp"
-#include "openPMD/Series.hpp"
 #include "outputs/output_attr.hpp"
 #include "outputs/parthenon_opmd.hpp"
 #include "outputs/restart.hpp"
@@ -155,18 +156,28 @@ void RestartReaderOPMD::ReadAllParamsOfType(const std::string &prefix, Params &p
       // Thus we replace it.
       std::replace(full_path.begin(), full_path.end(), '/', delim[0]);
 
-      T val;
-      if constexpr (implements<kokkos_view(T)>::value) {
-        val = params.Get<T>(key);
-        RestoreViewAttribute(full_path, val);
-      } else if constexpr (is_specialization_of<T, ParArrayGeneric>::value) {
-        val = params.Get<T>(key);
-        auto &view = val.KokkosView();
-        RestoreViewAttribute(full_path, view);
-      } else {
-        val = it->getAttribute(full_path).get<T>();
+      try {
+        T val;
+        if constexpr (implements<kokkos_view(T)>::value) {
+          val = params.Get<T>(key);
+          RestoreViewAttribute(full_path, val);
+        } else if constexpr (is_specialization_of<T, ParArrayGeneric>::value) {
+          val = params.Get<T>(key);
+          auto &view = val.KokkosView();
+          RestoreViewAttribute(full_path, view);
+        } else {
+          val = it->getAttribute(full_path).get<T>();
+        }
+        params.Update(key, val);
+      } catch (std::runtime_error e) {
+        // TODO(JMM/PG) Add failed load list of "fail/needs fix" list
+        if (Globals::my_rank == 0) {
+          std::stringstream ss;
+          ss << "Failed to load parameter " << fullpath
+             << " from the restart file! Using default value." << std::endl;
+          PARTHENON_WARN(ss);
+        }
       }
-      params.Update(key, val);
     }
   }
 }
@@ -200,8 +211,7 @@ void RestartReaderOPMD::ReadParams(const std::string &pkg_name, Params &p) {
 
 void RestartReaderOPMD::ReadBlocks(const std::string &var_name, IndexRange block_range,
                                    const OutputUtils::VarInfo &vinfo,
-                                   std::vector<Real> &data_vec,
-                                   int file_output_format_version, Mesh *pm) const {
+                                   std::vector<Real> &data_vec, Mesh *pm) const {
   int64_t comp_offset = 0; // offset data_vector to store component data
   for (auto &pmb : pm->block_list) {
     // TODO(pgrete) check if we should skip the suffix for level 0
