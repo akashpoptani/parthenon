@@ -257,7 +257,8 @@ GetMeshRecordAndComponentNames(const VarInfo &vinfo, const TopologicalElement te
 
 std::tuple<openPMD::Offset, openPMD::Extent>
 GetChunkOffsetAndExtent(Mesh *pm, std::shared_ptr<MeshBlock> pmb,
-                        const TopologicalElement te, const int coarsening_factor) {
+                        const TopologicalElement te, const int coarsening_factor,
+                        const SubOutputType output_type) {
   openPMD::Offset chunk_offset;
   openPMD::Extent chunk_extent;
   const auto loc = pm->Forest().GetLegacyTreeLocation(pmb->loc);
@@ -274,6 +275,18 @@ GetChunkOffsetAndExtent(Mesh *pm, std::shared_ptr<MeshBlock> pmb,
                     static_cast<uint64_t>(nx1_eff + TopologicalOffsetI(te))};
   } else {
     PARTHENON_THROW("1D output for openpmd not yet supported.");
+  }
+  int remove_comp = -1;
+  if (output_type == SubOutputType::X1Slice) {
+    remove_comp = 2;
+  } else if (output_type == SubOutputType::X2Slice) {
+    remove_comp = 1;
+  } else if (output_type == SubOutputType::X3Slice) {
+    remove_comp = 0;
+  }
+  if (remove_comp >= 0) {
+    chunk_extent.erase(chunk_extent.begin() + remove_comp);
+    chunk_offset.erase(chunk_offset.begin() + remove_comp);
   }
   return {chunk_offset, chunk_extent};
 }
@@ -321,8 +334,13 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
   auto filename = output_params.file_basename + "." + output_params.file_id;
   if (signal == SignalHandler::OutputSignal::now) {
     filename.append(".now");
+  } else if (signal == SignalHandler::OutputSignal::final &&
+             output_params.file_label_final) {
+    filename.append(".final");
   }
-  filename.append(".%05T.bp");
+  filename.append(".%05T");
+
+  filename.append(".bp");
   Series series = Series(filename, Access::CREATE,
 #ifdef MPI_PARALLEL
                          MPI_COMM_WORLD,
@@ -376,7 +394,36 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
     it.setTime(-1.0);
     it.setDt(-1.0);
   }
-  {
+
+  // TODO(reviewers): PG: I didn't want to pollute OutputParams with sth specific to this
+  // output type. It's not super nice to process `pin` info here but it did the job. Any
+  // suggestions?
+
+  const auto output_type_str = pin->GetOrAddString(
+      output_params.block_name, "output_type", "restart",
+      std::vector<std::string>{"restart", "x1slice", "x2slice", "x3slice"},
+      "Type of output in the file.");
+  // C++20 please
+  // using enum OpenPMDUtils::SubOutputType;
+  using OpenPMDUtils::SubOutputType;
+  auto output_type = SubOutputType::Restart;
+  if (output_type_str == "x1slice") {
+    output_type = SubOutputType::X1Slice;
+  } else if (output_type_str == "x2slice") {
+    output_type = SubOutputType::X2Slice;
+  } else if (output_type_str == "x3slice") {
+    output_type = SubOutputType::X3Slice;
+  }
+  const auto is_slice = output_type == SubOutputType::X1Slice ||
+                        output_type == SubOutputType::X2Slice ||
+                        output_type == SubOutputType::X3Slice;
+  auto slice_loc = std::numeric_limits<Real>::signaling_NaN();
+  if (is_slice) {
+    PARTHENON_REQUIRE_THROWS(pm->ndim == 3, "Slices are only implemented in 3D");
+    slice_loc = pin->GetReal(output_params.block_name, "slice_loc");
+  }
+
+  if (!is_slice) {
     PARTHENON_INSTRUMENT_REGION("Dump Params");
 
     for (const auto &[pkg_name, pkg] : pm->packages.AllPackages()) {
@@ -385,7 +432,7 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
     }
   }
   // Then our own
-  {
+  if (!is_slice) {
     PARTHENON_INSTRUMENT_REGION("write input");
     // write input key-value pairs
     std::ostringstream oss;
@@ -393,7 +440,7 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
     it.setAttribute("InputFile", oss.str());
   }
 
-  {
+  if (!is_slice) {
     // It's not clear we need all these attributes, but they mirror what's done in the
     // hdf5 output.
     it.setAttribute("WallTime", Driver::elapsed_main());
@@ -454,7 +501,7 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
   Kokkos::Profiling::popRegion(); // write Attributes
 
   // Write block metadata
-  {
+  if (!is_slice) {
     // Manually gather all block data first as it allows to use the (simpler)
     // Attribute interface rather than writing a distributed dataset -- especially as all
     // data is being read on restart by every rank anyway.
@@ -590,16 +637,16 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
             auto effective_nx = static_cast<std::uint64_t>(std::pow(2, level));
             openPMD::Extent global_extent;
             if (pm->ndim == 3) {
-              mesh_record.setGridSpacing(std::vector<Real>{dx3, dx2, dx1});
-              mesh_record.setAxisLabels({"z", "y", "x"});
-              mesh_record.setGridGlobalOffset({
+              auto grid_spacing = std::vector<Real>{dx3, dx2, dx1};
+              auto axis_labels = std::vector<std::string>{"z", "y", "x"};
+              auto global_offset = std::vector<Real>{
                   pm->mesh_size.xmin(X3DIR),
                   pm->mesh_size.xmin(X2DIR),
                   pm->mesh_size.xmin(X1DIR),
-              });
-              mesh_comp.setPosition(std::vector<Real>{
-                  0.5 - 0.5 * TopologicalOffsetK(te), 0.5 - 0.5 * TopologicalOffsetJ(te),
-                  0.5 - 0.5 * TopologicalOffsetI(te)});
+              };
+              auto position = std::vector<Real>{0.5 - 0.5 * TopologicalOffsetK(te),
+                                                0.5 - 0.5 * TopologicalOffsetJ(te),
+                                                0.5 - 0.5 * TopologicalOffsetI(te)};
               global_extent = {
                   static_cast<std::uint64_t>(pm->mesh_size.nx(X3DIR) /
                                              coarsening_factor_) *
@@ -614,6 +661,25 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
                           effective_nx +
                       TopologicalOffsetI(te),
               };
+              int remove_comp = -1;
+              if (output_type == SubOutputType::X1Slice) {
+                remove_comp = 2;
+              } else if (output_type == SubOutputType::X2Slice) {
+                remove_comp = 1;
+              } else if (output_type == SubOutputType::X3Slice) {
+                remove_comp = 0;
+              }
+              if (remove_comp >= 0) {
+                grid_spacing.erase(grid_spacing.begin() + remove_comp);
+                axis_labels.erase(axis_labels.begin() + remove_comp);
+                global_offset.erase(global_offset.begin() + remove_comp);
+                position.erase(position.begin() + remove_comp);
+                global_extent.erase(global_extent.begin() + remove_comp);
+              }
+              mesh_record.setGridSpacing(grid_spacing);
+              mesh_record.setAxisLabels(axis_labels);
+              mesh_record.setGridGlobalOffset(global_offset);
+              mesh_comp.setPosition(position);
             } else if (pm->ndim == 2) {
               mesh_record.setGridSpacing(std::vector<Real>{dx2, dx1});
               mesh_record.setAxisLabels({"y", "x"});
@@ -671,6 +737,7 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
             component_buffer_view(component_buffer.data(), nk, nj, ni);
         Kokkos::deep_copy(component_buffer_view, data);
 #endif
+        auto &coords = pmb->coords;
         auto out_var_h = out_var->data.GetHostMirrorAndCopy();
         for (const auto &te : vinfo.topological_elements) {
           auto ib = bounds.GetBoundsI(IndexDomain::interior, te);
@@ -693,20 +760,45 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
                 for (int k = kb.s; k <= kb.e; ++k) {
                   for (int j = jb.s; j <= jb.e; ++j) {
                     for (int i = ib.s; i <= ib.e; ++i) {
+                      // Skip cells for coarse grained outputs
                       if (((i - ib.s) % coarsening_factor_ != 0) ||
                           ((j - jb.s) % coarsening_factor_ != 0) ||
                           ((k - kb.s) % coarsening_factor_ != 0)) {
                         continue;
                       }
+                      // Skip cells outside slices
+                      if (is_slice) {
+                        if (output_type == SubOutputType::X1Slice) {
+                          if (slice_loc < coords.Xf<X1DIR>(k, j, i)) continue;
+                          if (slice_loc >= coords.Xf<X1DIR>(k, j, i + coarsening_factor_))
+                            continue;
+                        } else if (output_type == SubOutputType::X2Slice) {
+                          if (slice_loc < coords.Xf<X2DIR>(k, j, i)) continue;
+                          if (slice_loc >= coords.Xf<X2DIR>(k, j + coarsening_factor_, i))
+                            continue;
+                        } else if (output_type == SubOutputType::X3Slice) {
+                          if (slice_loc < coords.Xf<X3DIR>(k, j, i)) continue;
+                          if (slice_loc >= coords.Xf<X3DIR>(k + coarsening_factor_, j, i))
+                            continue;
+                        } else {
+                          PARTHENON_FAIL("Unclear how I got here.");
+                        }
+                      }
                       tmp_data[tmp_offset] = static_cast<OutT>(
                           out_var_h(static_cast<int>(te) % 3, t, u, v, k, j, i));
+
                       tmp_offset++;
                     }
                   }
                 }
+                // if no data was being selected
+                if (comp_offset == tmp_offset) {
+                  continue;
+                }
                 const auto [chunk_offset, chunk_extent] =
-                    OpenPMDUtils::GetChunkOffsetAndExtent(pm, pmb, te,
-                                                          coarsening_factor_);
+                    OpenPMDUtils::GetChunkOffsetAndExtent(pm, pmb, te, coarsening_factor_,
+                                                          output_type);
+
                 mesh_comp.storeChunkRaw(&tmp_data[comp_offset], chunk_offset,
                                         chunk_extent);
                 comp_idx += 1;
@@ -729,7 +821,7 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
   // -------------------------------------------------------------------------------- //
   //   WRITING Sparse metadata                                                        //
   // -------------------------------------------------------------------------------- //
-  if (num_sparse > 0) {
+  if (!is_slice && num_sparse > 0) {
     auto sparse_allocated_global = FlattendedLocalToGlobal<int8_t>(pm, sparse_allocated);
     it.setAttribute("SparseInfo", sparse_allocated_global);
     it.setAttribute("SparseFields", sparse_names);
@@ -741,39 +833,40 @@ void OpenPMDOutput::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *
   // -------------------------------------------------------------------------------- //
   //   WRITING PARTICLE DATA                                                          //
   // -------------------------------------------------------------------------------- //
+  if (!is_slice) {
 
-  Kokkos::Profiling::pushRegion("write particle data");
-  // TODO(pgrete) as above, first wrt differentiating between restart_ (last arg)
-  AllSwarmInfo all_swarm_info(pm->block_list, output_params.swarms,
-                              DumpOutputMode::RESTART);
-  for (auto &[swname, swinfo] : all_swarm_info.all_info) {
-    openPMD::ParticleSpecies swm = it.particles[swname];
-    // These indicate particles/meshblock and location in global index
-    // space where each meshblock starts
-    auto counts_global = FlattendedLocalToGlobal<std::size_t>(pm, swinfo.counts);
-    swm.setAttribute("counts", counts_global);
-    auto offsets_global = FlattendedLocalToGlobal<std::size_t>(pm, swinfo.offsets);
-    swm.setAttribute("offsets", offsets_global);
+    Kokkos::Profiling::pushRegion("write particle data");
+    // TODO(pgrete) as above, first wrt differentiating between restart_ (last arg)
+    AllSwarmInfo all_swarm_info(pm->block_list, output_params.swarms,
+                                DumpOutputMode::RESTART);
+    for (auto &[swname, swinfo] : all_swarm_info.all_info) {
+      openPMD::ParticleSpecies swm = it.particles[swname];
+      // These indicate particles/meshblock and location in global index
+      // space where each meshblock starts
+      auto counts_global = FlattendedLocalToGlobal<std::size_t>(pm, swinfo.counts);
+      swm.setAttribute("counts", counts_global);
+      auto offsets_global = FlattendedLocalToGlobal<std::size_t>(pm, swinfo.offsets);
+      swm.setAttribute("offsets", offsets_global);
 
-    if (swinfo.global_count == 0) {
-      continue;
+      if (swinfo.global_count == 0) {
+        continue;
+      }
+
+      OpenPMDUtils::WriteSwarmVar<int>(swinfo, swm, it);
+      OpenPMDUtils::WriteSwarmVar<uint64_t>(swinfo, swm, it);
+      OpenPMDUtils::WriteSwarmVar<Real>(swinfo, swm, it);
+
+      // From the HDF5 output:
+      // If swarm does not contain an "id" object, generate a sequential
+      // one for vis.
+      // BUT PG: this may break things in unpredicable ways
+      // I'm in favor of enforcing a global id somehow. We shold discuss.
+      PARTHENON_REQUIRE_THROWS(swinfo.var_info.count(swarm_position::id::name()) != 0 ||
+                                   swinfo.var_info.count("id") != 0,
+                               "Particles should always carry a unique, persistent id!");
     }
-
-    OpenPMDUtils::WriteSwarmVar<int>(swinfo, swm, it);
-    OpenPMDUtils::WriteSwarmVar<uint64_t>(swinfo, swm, it);
-    OpenPMDUtils::WriteSwarmVar<Real>(swinfo, swm, it);
-
-    // From the HDF5 output:
-    // If swarm does not contain an "id" object, generate a sequential
-    // one for vis.
-    // BUT PG: this may break things in unpredicable ways
-    // I'm in favor of enforcing a global id somehow. We shold discuss.
-    PARTHENON_REQUIRE_THROWS(swinfo.var_info.count(swarm_position::id::name()) != 0 ||
-                                 swinfo.var_info.count("id") != 0,
-                             "Particles should always carry a unique, persistent id!");
+    Kokkos::Profiling::popRegion(); // write particle data
   }
-  Kokkos::Profiling::popRegion(); // write particle data
-
   // The iteration can be closed in order to help free up resources.
   // The iteration's content will be flushed automatically.
   // An iteration once closed cannot (yet) be reopened.

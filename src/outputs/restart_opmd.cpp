@@ -169,11 +169,11 @@ void RestartReaderOPMD::ReadAllParamsOfType(const std::string &prefix, Params &p
           val = it->getAttribute(full_path).get<T>();
         }
         params.Update(key, val);
-      } catch (std::runtime_error e) {
+      } catch (...) {
         // TODO(JMM/PG) Add failed load list of "fail/needs fix" list
         if (Globals::my_rank == 0) {
           std::stringstream ss;
-          ss << "Failed to load parameter " << fullpath
+          ss << "Failed to load parameter " << full_path
              << " from the restart file! Using default value." << std::endl;
           PARTHENON_WARN(ss);
         }
@@ -243,7 +243,8 @@ void RestartReaderOPMD::ReadBlocks(const std::string &var_name, IndexRange block
             // Restarting from coarsened output not supported at the moment
             const int coarsening_factor = 1;
             const auto [chunk_offset, chunk_extent] =
-                OpenPMDUtils::GetChunkOffsetAndExtent(pm, pmb, te, coarsening_factor);
+                OpenPMDUtils::GetChunkOffsetAndExtent(
+                    pm, pmb, te, coarsening_factor, OpenPMDUtils::SubOutputType::Restart);
             mesh_comp.loadChunkRaw(&data_vec[comp_offset], chunk_offset, chunk_extent);
             comp_offset += std::accumulate(chunk_extent.cbegin(), chunk_extent.cend(), 1,
                                            std::multiplies<std::uint64_t>{});
