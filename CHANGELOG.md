@@ -3,6 +3,7 @@
 ## Current develop
 
 ### Added (new features/APIs/variables/...)
+- [[PR 1320]](https://github.com/parthenon-hpc-lab/parthenon/pull/1320) 1D Contour plotting
 - [[PR 1315]](https://github.com/parthenon-hpc-lab/parthenon/pull/1315) Add user specifiable BCs to solvers
 - [[PR 1192]](https://github.com/parthenon-hpc-lab/parthenon/pull/1192) Coalesced buffer communication
 - [[PR 1314]](https://github.com/parthenon-hpc-lab/parthenon/pull/1314) Add option of user specified BCs in AddBoundaryExchangeTasks
@@ -42,6 +43,7 @@
 - [[PR 1284]](https://github.com/parthenon-hpc-lab/parthenon/pull/1284) Fix some parameter types, move `DumpInputParameters` to `Driver`
 
 ### Infrastructure (changes irrelevant to downstream codes)
+- [[PR 1321]](https://github.com/parthenon-hpc-lab/parthenon/pull/1321) Reorganize docs into chapters
 - [[PR 1316]](https://github.com/parthenon-hpc-lab/parthenon/pull/1316) Update Cuda CI container (main change g++-13 to fix asan bug)
 - [[PR 1292]](https://github.com/parthenon-hpc-lab/parthenon/pull/1292) Remove shared ptr cycle and add a destructor for reductions
 - [[PR 1281]](https://github.com/parthenon-hpc-lab/parthenon/pull/1281) Move params implementation to std::any
