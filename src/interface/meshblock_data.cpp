@@ -54,6 +54,26 @@ void MeshBlockData<T>::AddField(const std::string &base_name, const Metadata &me
 }
 
 template <typename T>
+const std::vector<std::shared_ptr<Variable<T>>> &
+MeshBlockData<T>::GetSparseVarsForBase(const std::string &base) const {
+  auto it = sparse_name_cache_.find(base);
+  if (it != sparse_name_cache_.end()) return it->second;
+
+  std::vector<std::shared_ptr<Variable<T>>> vec;
+  if (resolved_packages && resolved_packages->SparseBaseNamePresent(base)) {
+    const auto &sparse_pool = resolved_packages->GetSparsePool(base);
+    vec.reserve(sparse_pool.pool().size());
+    for (const auto &iter : sparse_pool.pool()) {
+      // make sure variable exists - original code assumed it does
+      vec.push_back(varMap_.at(MakeVarLabel(base, iter.first)));
+    }
+  }
+
+  auto res = sparse_name_cache_.emplace(base, std::move(vec));
+  return res.first->second;
+}
+
+template <typename T>
 void MeshBlockData<T>::Add(std::shared_ptr<Variable<T>> var) noexcept {
   if (varUidMap_.count(var->GetUniqueID())) {
     PARTHENON_THROW("Tried to add variable " + var->label() + " twice!");
@@ -228,9 +248,22 @@ template <typename T>
 const VariableFluxPack<T> &MeshBlockData<T>::PackVariablesAndFluxesImpl(
     const std::vector<std::string> &var_names, const std::vector<std::string> &flx_names,
     const std::vector<int> &sparse_ids, PackIndexMap *map, vpack_types::UidVecPair *key) {
-  return PackListedVariablesAndFluxes(
-      GetVariablesByName(var_names, sparse_ids, FluxRequest::NoFlux),
-      GetVariablesByName(flx_names, sparse_ids, FluxRequest::OnlyFlux), map, key);
+  // return PackListedVariablesAndFluxes(
+  //     GetVariablesByName(var_names, sparse_ids, FluxRequest::NoFlux),
+  //     GetVariablesByName(flx_names, sparse_ids, FluxRequest::OnlyFlux), map, key);
+    auto p_vars = GetVarsAndFluxesByName(var_names, sparse_ids);
+    auto p_flxs = GetVarsAndFluxesByName(flx_names, sparse_ids); // still needed if flx_names list is separate
+    // However, if var_names already contains names and flx_names is just the base "U", you want to avoid
+    // calling combined twice in trivial cases. For minimal change: do this:
+
+    auto vars_and_fluxes = GetVarsAndFluxesByName(var_names, sparse_ids);
+    // If flx_names is not empty and different, call combined for flx_names too:
+    auto flx_pair = GetVarsAndFluxesByName(flx_names, sparse_ids);
+
+    // Now pass the appropriate VarLists to PackListedVariablesAndFluxes:
+    return PackListedVariablesAndFluxes(vars_and_fluxes.first,
+                                        flx_pair.first /* or flx_pair.second? */,
+                                        map, key);
 }
 
 /// Variables and fluxes by Metadata Flags
@@ -366,6 +399,60 @@ MeshBlockData<T>::GetVariablesByFlag(const Metadata::FlagCollection &flags,
   }
 
   return var_list;
+}
+
+// Replace the two separate GetVariablesByName(...) calls with a single combined traversal
+// Add this new member function (next to other MeshBlockData<T> functions). It returns a pair of VarList: first = variables (NoFlux), second = fluxes (OnlyFlux).
+// It mirrors the logic of the original GetVariablesByName but does both in a single pass and reuses the cache.
+template <typename T>
+std::pair<typename MeshBlockData<T>::VarList, typename MeshBlockData<T>::VarList>
+MeshBlockData<T>::GetVarsAndFluxesByName(const std::vector<std::string> &names,
+                                         const std::vector<int> &sparse_ids) const {
+  PARTHENON_INSTRUMENT
+  typename MeshBlockData<T>::VarList var_list;
+  typename MeshBlockData<T>::VarList flux_list;
+
+  // Build sparse id set only once if non-empty
+  std::unordered_set<int> sparse_ids_set;
+  const bool have_sparse_ids = !sparse_ids.empty();
+  if (have_sparse_ids) {
+    sparse_ids_set.reserve(sparse_ids.size() * 2);
+    sparse_ids_set.insert(sparse_ids.begin(), sparse_ids.end());
+  }
+
+  for (const auto &name : names) {
+    const auto itr = varMap_.find(name);
+    if (itr != varMap_.end()) {
+      const auto &v = itr->second;
+      const auto &m = v->metadata();
+
+      // variable (skip flux-only metadata)
+      if (!m.IsSet(Metadata::Flux)) {
+        var_list.Add(v, sparse_ids_set);
+      }
+
+      // if this variable has fluxes, add the flux variable to flux_list
+      if (m.IsSet(Metadata::WithFluxes)) {
+        const auto &vf = varMap_.at(m.GetFluxName()); // single lookup per variable
+        flux_list.Add(vf, sparse_ids_set);
+      }
+    } else if ((resolved_packages != nullptr) &&
+               (resolved_packages->SparseBaseNamePresent(name))) {
+      // Use cached expansion of sparse pool
+      const auto &vec = GetSparseVarsForBase(name);
+      for (const auto &v : vec) {
+        const auto &m = v->metadata();
+        if (!m.IsSet(Metadata::Flux)) {
+          var_list.Add(v, sparse_ids_set);
+        }
+        if (m.IsSet(Metadata::WithFluxes)) {
+          const auto &vf = varMap_.at(m.GetFluxName());
+          flux_list.Add(vf, sparse_ids_set);
+        }
+      }
+    }
+  }
+  return {var_list, flux_list};
 }
 
 template <typename T>

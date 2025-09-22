@@ -66,6 +66,9 @@ class MeshBlockData {
   /// Constructor
   MeshBlockData<T>() = default;
   explicit MeshBlockData<T>(const std::string &name) : stage_name_(name) {}
+// in MeshBlockData<T> class definition (header)
+  mutable std::unordered_map<std::string,
+      std::vector<std::shared_ptr<Variable<T>>>> sparse_name_cache_;
 
   std::shared_ptr<MeshBlock> GetBlockSharedPointer() const {
     if (pmy_block.expired()) {
@@ -300,6 +303,14 @@ class MeshBlockData {
   }
 
   using VarList = VarListWithKeys<T>;
+
+// Add our new optimized functions
+std::pair<VarList, VarList> GetVarsAndFluxesByName(
+    const std::vector<std::string> &names,
+    const std::vector<int> &sparse_ids = {}) const;
+
+const std::vector<std::shared_ptr<Variable<T>>> &GetSparseVarsForBase(
+    const std::string &base) const;
 
   /// Get list of variables and labels by names (either a full variable name or sparse
   /// base name), optionally selecting only given sparse ids
